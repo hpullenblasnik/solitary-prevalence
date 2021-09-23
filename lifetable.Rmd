@@ -1,0 +1,239 @@
+---
+title: "Pop Prev Solitary Lifetable"
+author: "Hannah Pullen-Blasnik and Bruce Western"
+date: "08/25/2020"
+output: html_notebook
+---
+
+```{r setup, include=F}
+library(tidyverse)
+library(haven)
+library(ggplot2)
+library(lubridate)
+
+data_folder <- "data/"
+jcore_output_folder <- paste0(data_folder, "jcore_style/")
+results_folder <- paste0(data_folder, "output/")
+```
+
+```{r}
+pop <- read_csv(paste0(jcore_output_folder, "bc_pop_avg.csv"))
+mig <- read_csv(paste0(jcore_output_folder, "migration.csv"))
+mort <- read_csv(paste0(jcore_output_folder, "mortality.csv"))
+```
+
+```{r}
+# not available for public release
+#bc_df <- read_csv("") 
+```
+
+
+```{r}
+# to scale the ID counts
+byear_scale <- read_csv(paste0(data_folder, "birthyear_scalers.csv"))
+```
+
+#### Function: Create Data Pre-Pivot ####
+
+```{r}
+make_coredf <- function(df, scale_df, solitary=T, min_days=0) {
+  # df  - df of PASS birthcohort data
+  # scale_df   - df of how many birth cohort years to scale each age by
+  # solitary - whether calculating solitary or incarceration (default solitary)
+  # days - how many days of solitary to filter to (default > 0)
+  # Returns summary df ready to convert to jailcore style in excel
+  
+  df <- df %>% filter(!is.na(race) & !is.na(male))
+  
+  if(solitary==T){
+    df_filter <- df %>% 
+      filter(sanction=="solitary" & acdcdays>min_days) %>% 
+      mutate(age=miscon_year-birth_year)
+  } else {
+    df_filter <- df %>% mutate(age=admit_year-birth_year)
+  }
+  
+  print(paste("Calculations based on", 
+              df_filter %>% select(id) %>% distinct() %>% count(), 
+              "unique IDs"))
+  
+  id_level <- df_filter %>%
+    group_by(id, race, male, birth_year) %>%
+    summarize(first_acdc_age = min(age, na.rm=T))  %>% 
+    ungroup() 
+  
+  # Get to counts by age, gender, race, of FIRST entry meeting requirements
+  # NOTE: data for some categories very sparse. Use CSV byear_scale to appropriately scale birth cohorts rather than counting birth years (omits years where 0s)
+  summ_df <- id_level %>%
+    group_by(race, male, first_acdc_age) %>%
+    summarize(n_ids = n_distinct(id)) %>% 
+    ungroup()
+  
+  core_df <- scale_df %>%
+    left_join(summ_df, by=c("Age"="first_acdc_age")) %>%
+    mutate(scaled_n_ids = n_ids/Num_BirthYrs) %>%
+    rename(age=Age)
+  
+  core_df
+}
+```
+
+
+#### Function: Pivot Data ####
+
+```{r}
+pivot_pass_df <- function(core_df) {
+  pivot_df <- core_df %>%
+    group_by(age) %>%
+    summarize(
+      total=sum(scaled_n_ids),
+      female=sum(scaled_n_ids[male=="female"], na.rm=T),
+      male=sum(scaled_n_ids[male=="male"], na.rm=T),
+      white=sum(scaled_n_ids[race=="white"], na.rm=T),
+      black=sum(scaled_n_ids[race=="black"], na.rm=T),
+      Hispanic=sum(scaled_n_ids[race=="Hispanic"], na.rm=T),
+      other=sum(scaled_n_ids[race=="other"], na.rm=T)
+    ) %>%
+    ungroup()
+  
+  pivot_2way <- core_df %>%
+    group_by(age) %>%
+    summarize(
+      f_white=sum(scaled_n_ids[(male=="female") & (race=="white")], na.rm=T),
+      f_black=sum(scaled_n_ids[(male=="female") & (race=="black")], na.rm=T),
+      f_Hispanic=sum(scaled_n_ids[(male=="female") & (race=="Hispanic")], na.rm=T),
+      f_other=sum(scaled_n_ids[(male=="female") & (race=="other")], na.rm=T),
+      m_white=sum(scaled_n_ids[(male=="male") & (race=="white")], na.rm=T),
+      m_black=sum(scaled_n_ids[(male=="male") & (race=="black")], na.rm=T),
+      m_Hispanic=sum(scaled_n_ids[(male=="male") & (race=="Hispanic")], na.rm=T),
+      m_other=sum(scaled_n_ids[(male=="male") & (race=="other")], na.rm=T)
+    ) %>% 
+    ungroup()
+  
+  core_piv <- pivot_df %>% 
+    left_join(pivot_2way, by="age") %>% 
+    replace(is.na(.), 0) 
+  
+  core_piv
+}
+```
+
+
+# Lifetable Cumulative Risk Calculations
+
+```{r}
+life_func <- function(solitary, pop, mig, mort, robust_dr=F, radix=1.0e5) {
+  # solitary  - df of counts of age-specific number incarcerated for first time
+  # pop   - df of age-specific population counts from census
+  # mig - df of age-specific out-migration rates from PA
+  # mort - df of age-specific mortality rates
+  # robust_dr - whether to calculate the normal death rate or robust (x2 death rate)
+  # radix - radix to use in calculation (preset to 1.0e5)
+  # Returns matrix of lifetable calculations based on radix for all columns in input tables
+  
+  # number rows, columns
+  n <- nrow(solitary)
+  c <- ncol(solitary)
+  
+  # calculate drate or robust drate (2x mortality + migration)
+  drate <- mig %>% bind_rows(mort) %>% group_by(age) %>% summarize_all(sum, na.rm=T) %>%
+      ungroup()
+  
+  if (robust_dr==TRUE) {
+    drate <- drate %>% group_by(age) %>% summarize_all(~(.*2)) %>% ungroup()
+  }
+
+  # calculate survival rate from drate
+  srate <-  drate %>% mutate_at(vars(-age), ~1-.)
+  
+  # Age as a column cannot be in calculations. Drop it here and to merge back on later
+  age_vec <- solitary %>% select(age)
+  solitary <- solitary[2:c]
+  srate <- srate[2:c]
+  pop <- pop[2:c]
+  
+  # calculate rolling survival rate based on srate and solitary population
+  jsurv <- data.frame(matrix(0, ncol = c-1, nrow = 1))
+  colnames(jsurv) <- names(solitary)
+  jsurv <- jsurv %>% bind_rows(solitary[1,]*srate[1,])
+    for(i in 3:n) {
+      jsurv <-  jsurv %>% bind_rows(srate[i-1,]*(jsurv[i-1,] + solitary[i-1,]))
+    }
+  
+  # Calculate the population at risk by subtracting the numbers calculated above
+  popatrisk <-  pop-jsurv
+  
+  # Calculate proportion that have first solitary confinement at each age
+  fsol <- solitary/popatrisk
+  
+  ## Lifetable calculations based on radix
+  hpop <- data.frame(matrix(radix, ncol = c-1, nrow = 1))
+  colnames(hpop) <- names(solitary)
+    for(i in 1:n) {
+        jailed <- hpop[i,] * fsol[i,]
+        hpop <- hpop %>% bind_rows(hpop[i,]-jailed)
+    }
+  hpop <- hpop[-1,]
+  
+  # Calculate cumulative risk of solitary confinement at each age
+  cumrisk <- hpop %>% mutate_all(~1-(./radix))
+  
+  # Add age back in to each
+  colnames(hpop) <- paste(colnames(hpop), "neversol", sep="_")
+  hpop <- bind_cols(age_vec, hpop)
+  cumrisk <- bind_cols(age_vec, cumrisk)
+  fsol <- bind_cols(age_vec, fsol)
+  
+  # Create df of never solitary (hpop), cumulative risk (cumrisk), first solitary (fsol)
+  out <- cumrisk %>% 
+    full_join(fsol, by="age", suffix=c("_cumrisk", "_firstsol")) %>%
+    full_join(hpop, by="age")
+  out
+}
+```
+
+#### Any Incarceration: Not just solitary, for all IDs
+
+```{r}
+any_incar <- make_coredf(bc_df, byear_scale, solitary=F, min_days=0)
+
+incar_piv <- pivot_pass_df(any_incar)
+#write_csv(incar_piv, paste0(jcore_style, "example_incarcerated.csv"))
+
+incar_lf <- life_func(incar_piv, pop, mig, mort)
+#write_csv(incar_lf, paste0(results_folder, "incar_lf_20200825.csv"))
+
+incar_lf
+```
+
+Example Solitary Confinement (> 0 days)
+
+```{r}
+sol <- makecoredf(bc_df, byear_scale, solitary=T, min_days=0) %>%
+  pivot_pass_df()
+#write_csv(sol, paste0(jcore_style, "example_solitary.csv"))
+```
+
+
+#### Continuous Cutpoints ####
+
+```{r}
+duration_df <- make_coredf(bc_df, byear_scale, solitary=T, min_days=0) %>%
+  pivot_pass_df() %>%
+  life_func(pop, mig, mort) %>%
+  mutate(sol_duration=0)
+
+
+for (i in 1:365){
+  df_cut <- make_coredf(bc_df, byear_scale, solitary=T, min_days=i) %>%
+    pivot_pass_df() %>%
+    life_func(pop, mig, mort) %>%
+    mutate(sol_duration=i)
+  
+  duration_df <- duration_df %>% bind_rows(df_cut)
+}
+
+#write_csv(duration_df, paste0(results_folder, "solitary_durations.csv"))
+```
+
+

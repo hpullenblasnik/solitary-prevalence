@@ -1,0 +1,357 @@
+---
+title: "Pop Prevalence Solitary Data Cleaning"
+author: "Hannah Pullen-Blasnik"
+date: "08/25/2020"
+output: html_notebook
+---
+
+```{r setup, include=F}
+library(tidyverse)
+library(haven)
+library(ggplot2)
+library(lubridate)
+
+data_folder <- "data/"
+census_folder <- paste0(data_folder, "external_data/")
+jcore_output_folder <- paste0(data_folder, "jcore_style/")
+```
+
+# External Data
+
+#### Census Data ####
+
+Downloaded from: 
+https://www.census.gov/data/tables/time-series/demo/popest/2010s-state-detail.html
+
+```{r}
+create_census_raw <- function(census_folder, file_name){
+  # Import data
+  pop_df <- read_csv(paste0(census_folder, file_name))
+  
+  # Clean data --> SEX==0 and ORIGIN==0 are total rows, delete those before analysis.
+  pop_clean <- pop_df %>%
+    filter(NAME=="Pennsylvania" & SEX != 0 & ORIGIN != 0) %>%
+    mutate(race=if_else(ORIGIN==2, "Hispanic", 
+                        if_else(RACE==2, "black", 
+                                if_else(RACE==1, "white", "other"))),
+           male=if_else(SEX==1, "male", "female")) %>%
+    select(race, male, AGE, CENSUS2010POP, ESTIMATESBASE2010, POPESTIMATE2010, POPESTIMATE2011,
+           POPESTIMATE2012, POPESTIMATE2013, POPESTIMATE2014, POPESTIMATE2015, POPESTIMATE2016,
+           POPESTIMATE2017, POPESTIMATE2018, POPESTIMATE2019) %>%
+    rename(age=AGE)
+  
+  # summarize to age, race, male level
+  pop_sum <- pop_clean %>% 
+    group_by(age, race, male) %>% 
+    summarize(pop=sum(CENSUS2010POP, na.rm=T),
+              base_2010=sum(ESTIMATESBASE2010, na.rm=T),
+              est_2010=sum(POPESTIMATE2010, na.rm=T),
+              est_2011=sum(POPESTIMATE2011, na.rm=T),
+              est_2012=sum(POPESTIMATE2012, na.rm=T),
+              est_2013=sum(POPESTIMATE2013, na.rm=T),
+              est_2014=sum(POPESTIMATE2014, na.rm=T),
+              est_2015=sum(POPESTIMATE2015, na.rm=T),
+              est_2016=sum(POPESTIMATE2016, na.rm=T),
+              est_2017=sum(POPESTIMATE2017, na.rm=T),
+              est_2018=sum(POPESTIMATE2018, na.rm=T),
+              est_2019=sum(POPESTIMATE2019, na.rm=T)
+              ) %>%
+    ungroup() 
+  
+  # Filter to birth cohort
+  pop_bc <- pop_sum %>%
+    filter(age>=18 & age<=32)
+
+  pop_bc
+}
+```
+
+```{r}
+census_pivot <- function(census_df){
+  pop_long <- census_df %>%
+    select(-pop, -base_2010) %>% 
+    pivot_longer(cols=starts_with("est_"), names_to="pop_year", values_to="pop")
+  
+  pivot_df <- pop_long %>%
+    group_by(pop_year, age) %>%
+    summarize(
+      total=sum(pop),
+      female=sum(pop[male=="female"], na.rm=T),
+      male=sum(pop[male=="male"], na.rm=T),
+      white=sum(pop[race=="white"], na.rm=T),
+      black=sum(pop[race=="black"], na.rm=T),
+      Hispanic=sum(pop[race=="Hispanic"], na.rm=T),
+      other=sum(pop[race=="other"], na.rm=T)
+    ) %>% 
+    ungroup()
+  
+  pivot_2way <- pop_long %>%
+    group_by(pop_year, age) %>%
+    summarize(
+      f_white=sum(pop[(male=="female") & (race=="white")], na.rm=T),
+      f_black=sum(pop[(male=="female") & (race=="black")], na.rm=T),
+      f_Hispanic=sum(pop[(male=="female") & (race=="Hispanic")], na.rm=T),
+      f_other=sum(pop[(male=="female") & (race=="other")], na.rm=T),
+      m_white=sum(pop[(male=="male") & (race=="white")], na.rm=T),
+      m_black=sum(pop[(male=="male") & (race=="black")], na.rm=T),
+      m_Hispanic=sum(pop[(male=="male") & (race=="Hispanic")], na.rm=T),
+      m_other=sum(pop[(male=="male") & (race=="other")], na.rm=T)
+    ) %>%
+    ungroup()
+  
+  # Stagger years for only our observed birth cohort
+  pop_piv <- pivot_df %>% 
+    left_join(pivot_2way, by=c("pop_year", "age")) %>%
+    filter(
+      (pop_year=="est_2010" & age<25) | (pop_year=="est_2011" & age<26 & age>21) | 
+        (pop_year=="est_2012" & age<27 & age>22) | (pop_year=="est_2013" & age<28 & age>23) | 
+        (pop_year=="est_2014" & age<29 & age>24) | (pop_year=="est_2015" & age<30 & age>25) | 
+        (pop_year=="est_2016" & age<31 & age>26) | (pop_year=="est_2017" & age<32 & age>27) | 
+        (pop_year=="est_2018" & age<33 & age>28)
+    ) %>%
+    replace(is.na(.), 0)
+  
+  pop_piv
+}
+```
+
+```{r}
+census_average <- function(census_pivot){
+  pop_avg <- pop_piv %>% 
+    group_by(age) %>% 
+    summarize(
+      total=round(mean(total), digits=0),
+      male=round(mean(male), digits=0),
+      female=round(mean(female), digits=0),
+      white=round(mean(white), digits=0),
+      black=round(mean(black), digits=0),
+      Hispanic=round(mean(Hispanic), digits=0),
+      other=round(mean(other), digits=0),
+      f_white=round(mean(f_white), digits=0),
+      f_black = round(mean(f_black), digits=0),
+      f_Hispanic=round(mean(f_Hispanic), digits=0),
+      f_other=round(mean(f_other), digits=0),
+      m_white=round(mean(m_white), digits=0),
+      m_black=round(mean(m_black), digits=0),
+      m_Hispanic=round(mean(m_Hispanic), digits=0),
+      m_other=round(mean(m_other), digits=0)
+    )
+
+  pop_avg
+}
+```
+
+
+```{r}
+pop_bc <- create_census_raw(census_folder, "sc-est2019-alldata6.csv")
+#write_csv(pop_bc, paste0(census_folder, "bc_census_pop_est.csv"))
+
+pop_piv <- census_pivot(pop_bc)
+#write_csv(pop_piv, paste0(census_folder, "bc_census_popyrs.csv"))
+
+pop <- census_average(pop_piv)
+#write_csv(pop, paste0(jcore_output_folder, "bc_pop_avg.csv"))
+
+pop
+```
+
+#### Migration Data (IPUMS) ####
+
+Downloaded from: https://usa.ipums.org/usa-action/data_requests/download
+
+The race data here is tricky, as the single-option race variable, RACESING, disappears partway through data collection in 2015. We attempt to mimic the RACESING variable by combining information from RACE and RACED to determine a single racial category for analysis. Our coding keeps values relatively consistent across the years immediately before and after the variable coding switch. 
+
+Filter to only birth cohort and aggregate years accordingly. The population numbers are offset compared to how many people left the state in the past year, so lagging them will put them back to the correct proportions
+
+```{r}
+create_mig_raw <- function(census_folder, file_name){
+  acs_df <- read_csv(paste0(census_folder, file_name))
+  
+  summ_acs <- acs_df %>%
+    mutate(race=if_else(HISPAN %in% c(1,2,3,4), "Hispanic",
+                        if_else((!is.na(RACESING) & RACESING==1) | RACE==1, "white", 
+                                if_else((!is.na(RACESING) & RACESING==2) | RACE==2 | 
+                                          RACED==801 | RACED>=830, "black", "other"))),
+           male=if_else(SEX==1, "male", "female"),
+           pa=if_else(STATEFIP==42, 1, 0, missing=0),
+           weighted_ppl=PERWT/100.0,
+           new_state=if_else(MIGRATE1 %in% c(3,4) | MIGRATE1D %in% c(30, 31, 32, 40), 
+                             1, 0, missing=0),
+           new_to_pa = if_else(new_state==1 & pa==1, 1, 0, missing=0),
+           pa_last_yr=if_else(MIGPLAC1==42, 1, 0, missing=0),
+           left_pa=if_else(pa_last_yr==1 & pa==0, 1, 0, missing=0)
+          ) %>%
+    group_by(YEAR, AGE, male, race) %>%
+    summarize(pa_pop = sum(pa * weighted_ppl),
+              new_pa_pop = sum(new_to_pa * weighted_ppl),
+              left_pa_pop = sum(left_pa * weighted_ppl)) %>%
+    ungroup()
+  
+  acs_sum <- summ_acs %>%
+    mutate(birth_year=YEAR-AGE) %>%
+    group_by(birth_year, male, race) %>%
+    mutate(lag_pop = lag(pa_pop, default = first(pa_pop), order_by = YEAR)) %>%
+    ungroup() %>%
+    filter(birth_year >= 1986 & birth_year <=1989) %>%
+    group_by(AGE, male, race) %>%
+    summarize(left_pa_pop=sum(left_pa_pop, na.rm=T),
+              lag_pop=sum(lag_pop, na.rm=T)
+              ) %>%
+    ungroup() %>%
+    mutate(outmig_rate = left_pa_pop/lag_pop)
+  
+  acs_sum
+}
+```
+
+```{r}
+pivot_mig_df <- function(core_df) {
+  pivot_df <- core_df %>%
+    group_by(AGE) %>%
+    summarize(
+      total=sum(left_pa_pop, na.rm=T)/sum(lag_pop, na.rm=T),
+      female=sum(left_pa_pop[male=="female"], na.rm=T)/sum(lag_pop[male=="female"], na.rm=T),
+      male=sum(left_pa_pop[male=="male"], na.rm=T)/sum(lag_pop[male=="male"], na.rm=T),
+      white=sum(left_pa_pop[race=="white"], na.rm=T)/sum(lag_pop[race=="white"], na.rm=T),
+      black=sum(left_pa_pop[race=="black"], na.rm=T)/sum(lag_pop[race=="black"], na.rm=T),
+      Hispanic=sum(left_pa_pop[race=="Hispanic"], na.rm=T)/sum(lag_pop[race=="Hispanic"],
+                                                               na.rm=T),
+      other=sum(left_pa_pop[race=="other"], na.rm=T)/sum(lag_pop[race=="other"], na.rm=T)
+    ) %>%
+    ungroup()
+  
+  pivot_2way <- core_df %>%
+    group_by(AGE) %>%
+    summarize(
+      f_white=sum(left_pa_pop[(male=="female") & (race=="white")], na.rm=T)/
+        sum(lag_pop[(male=="female") & (race=="white")], na.rm=T),
+      f_black=sum(left_pa_pop[(male=="female") & (race=="black")], na.rm=T)/
+        sum(lag_pop[(male=="female") & (race=="black")], na.rm=T),
+      f_Hispanic=sum(left_pa_pop[(male=="female") & (race=="Hispanic")], na.rm=T)/
+        sum(lag_pop[(male=="female") & (race=="Hispanic")], na.rm=T),
+      f_other=sum(left_pa_pop[(male=="female") & (race=="other")], na.rm=T)/
+        sum(lag_pop[(male=="female") & (race=="other")], na.rm=T),
+      m_white=sum(left_pa_pop[(male=="male") & (race=="white")], na.rm=T)/
+        sum(lag_pop[(male=="male") & (race=="white")], na.rm=T),
+      m_black=sum(left_pa_pop[(male=="male") & (race=="black")], na.rm=T)/
+        sum(lag_pop[(male=="male") & (race=="black")], na.rm=T),
+      m_Hispanic=sum(left_pa_pop[(male=="male") & (race=="Hispanic")], na.rm=T)/
+        sum(lag_pop[(male=="male") & (race=="Hispanic")], na.rm=T),
+      m_other=sum(left_pa_pop[(male=="male") & (race=="other")], na.rm=T)/
+        sum(lag_pop[(male=="male") & (race=="other")], na.rm=T)
+    ) %>% 
+    ungroup()
+  
+  core_piv <- pivot_df %>% 
+    left_join(pivot_2way, by="AGE") %>% 
+    rename(age=AGE) %>% 
+    replace(is.na(.), 0)
+  
+  core_piv
+}
+```
+
+
+```{r}
+acs_sum <- create_mig_raw(census_folder, "usa_00001.csv")
+#write_csv(acs_sum, paste0(census_folder, "bc_acs_migration.csv"))
+
+mig <- pivot_mig_df(acs_sum)
+#write_csv(mig, paste0(jcore_output_folder, "migration.csv"))
+
+mig
+```
+
+#### Mortality ####
+
+Downloaded from: https://wonder.cdc.gov/controller/datarequest/D76;jsessionid=6AA4D02724C6A57536EFE9ADF294F040
+
+Some rows are omitted, assuming ones where there were no deaths. These will be set to NA. 
+
+```{r}
+create_mort_raw <- function(census_folder, file_name){
+  mort_df <- read_csv(paste0(census_folder, file_name))
+  
+  mort_clean <- mort_df %>%
+    filter((Hispanic != "Not Stated") & (Age != "NS")) %>%
+    mutate(Age=as.numeric(Age),
+           male=if_else(Gender=="Male", "male", "female"),
+           race=if_else(Hispanic=="Hispanic or Latino", "Hispanic",
+                        if_else(Race=="White", "white", 
+                                if_else(Race=="Black or African American", "black", 
+                                        "other")))) %>%
+    filter((Age >=18) & (Age <=32)) %>%
+    mutate(Population=as.numeric(Population)) %>%
+    select(Age, race, male, Deaths, Population)
+  
+  mort_summ <- mort_clean %>%
+    group_by(Age, race, male) %>%
+    summarize(deaths=sum(Deaths), pop=sum(Population)) %>%
+    ungroup() %>%
+    mutate(rate=(deaths/pop))
+  
+  mort_summ
+}
+```
+
+
+```{r}
+pivot_mort_df <- function(core_df) {
+  pivot_df <- core_df %>%
+    group_by(Age) %>%
+    summarize(
+      total=sum(deaths, na.rm=T)/sum(pop, na.rm=T),
+      female=sum(deaths[male=="female"], na.rm=T)/sum(pop[male=="female"], na.rm=T),
+      male=sum(deaths[male=="male"], na.rm=T)/sum(pop[male=="male"], na.rm=T),
+      white=sum(deaths[race=="white"], na.rm=T)/sum(pop[race=="white"], na.rm=T),
+      black=sum(deaths[race=="black"], na.rm=T)/sum(pop[race=="black"], na.rm=T),
+      Hispanic=sum(deaths[race=="Hispanic"], na.rm=T)/sum(pop[race=="Hispanic"], na.rm=T),
+      other=sum(deaths[race=="other"], na.rm=T)/sum(pop[race=="other"], na.rm=T)
+    ) %>%
+    ungroup()
+  
+  pivot_2way <- core_df %>%
+    group_by(Age) %>%
+    summarize(
+      f_white=sum(deaths[(male=="female") & (race=="white")], na.rm=T)/
+        sum(pop[(male=="female") & (race=="white")], na.rm=T),
+      f_black=sum(deaths[(male=="female") & (race=="black")], na.rm=T)/
+        sum(pop[(male=="female") & (race=="black")], na.rm=T),
+      f_Hispanic=sum(deaths[(male=="female") & (race=="Hispanic")], na.rm=T)/
+        sum(pop[(male=="female") & (race=="Hispanic")], na.rm=T),
+      f_other=sum(deaths[(male=="female") & (race=="other")], na.rm=T)/
+        sum(pop[(male=="female") & (race=="other")], na.rm=T),
+      m_white=sum(deaths[(male=="male") & (race=="white")], na.rm=T)/
+        sum(pop[(male=="male") & (race=="white")], na.rm=T),
+      m_black=sum(deaths[(male=="male") & (race=="black")], na.rm=T)/
+        sum(pop[(male=="male") & (race=="black")], na.rm=T),
+      m_Hispanic=sum(deaths[(male=="male") & (race=="Hispanic")], na.rm=T)/
+        sum(pop[(male=="male") & (race=="Hispanic")], na.rm=T),
+      m_other=sum(deaths[(male=="male") & (race=="other")], na.rm=T)/
+        sum(pop[(male=="male") & (race=="other")], na.rm=T)
+    ) %>% 
+    ungroup()
+  
+  core_piv <- pivot_df %>% 
+    left_join(pivot_2way, by="Age") %>% 
+    rename(age=Age) %>% 
+    replace(is.na(.), 0)
+  
+  core_piv
+}
+```
+
+
+```{r}
+mort_summ <- create_mort_raw(census_folder, "pa_mortality_data.csv")
+#write_csv(mort_summ, paste0(census_folder, "pa_mortality_clean.csv"))
+
+mort <- pivot_mort_df(mort_summ)
+#write_csv(mort, paste0(jcore_output_folder, "mortality.csv"))
+
+mort
+```
+
+# PA DOC Data
+
+Not available for public release. 

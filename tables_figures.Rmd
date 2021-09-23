@@ -1,0 +1,646 @@
+---
+title: "Pop Prev Tables and Figures"
+author: "Hannah Pullen-Blasnik"
+date: "09/01/2021"
+output: html_notebook
+---
+
+```{r setup, include=F}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+
+data_folder <- "data/"
+results_folder <- paste0(data_folder, "output/")
+```
+
+## Load data for tables
+
+Output duration lifetables for incarceration and for solitary (0-365 days)
+```{r}
+inc_dur <- read_csv(paste0(results_folder, "incar_lf_20200825.csv"))
+lf_dur <- read_csv(paste0(results_folder, "solitary_durations.csv"))
+```
+
+Birth cohort dataset at the misconduct level
+```{r}
+# not available for public release
+bc_df <- read_csv("birthcohort_data_20200825.csv")
+
+head(bc_df)
+```
+
+## Table 1: First Solitary Charge.
+
+Percentage distribution of the recorded reasons for first-time solitary confinement for a Pennsylvania prison admission cohort, born 1986-1989, by gender, race and ethnicity.
+
+Combine anyviolent, anydrug, anydefiance, anythreat, anycontraband, anyrule, anyproperty, anyother, s_ac into 5 (ordered) categories: violent, threat, contraband, defiance, AC
+
+```{r}
+first_sol_miscon <- bc_df %>% 
+  filter(sanction=="solitary" & acdcdays > 0) %>%
+  group_by(id) %>%
+  mutate(first_sol_miscon=min(miscon_date)) %>%
+  ungroup() %>%
+  filter(first_sol_miscon==miscon_date) %>%
+  mutate(
+    main.charge=case_when(
+      anyviolent==1 ~ "Violent",
+      anythreat==1 ~ "Threat",
+      anydrug==1 | anycontraband==1 ~ "Contraband",
+      anydefiance==1 | anyrule==1 | anyproperty==1 | anyother==1 ~ "Defiance",
+      s_ac==1 ~ "AC",
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+```{r}
+charge_tbl <- first_sol_miscon %>% 
+  group_by(male, race, main.charge) %>% 
+  count() %>% 
+  ungroup() %>%
+  pivot_wider(names_from=c(race), values_from=c(n)) %>%
+  replace(is.na(.), 0) %>%
+  mutate(total=white+black+Hispanic+other) %>%
+  group_by(male) %>%
+  mutate_at(vars(white, black, Hispanic, other, total), funs(round((./sum(.))*100, digits=1))) %>%
+  ungroup() %>%
+  bind_rows(first_sol_miscon %>% group_by(male, race) %>% count() %>% ungroup() %>%
+              pivot_wider(names_from=c(race), values_from=c(n)) %>% 
+              mutate(main.charge="Sample Size (N)", total=white+black+Hispanic+other)) %>%
+  arrange(desc(male))
+
+charge_tbl
+```
+
+```{r}
+knitr::kable(charge_tbl %>% select(-male), format="html", digits=1, 
+             format.args = list(scientific = FALSE, big.mark=","), 
+             caption = "Table 1: First Solitary Charge. Percentage distribution of the recorded reasons for first-time solitary confinement for a Pennsylvania prison admission cohort, born 1986-1989, by gender, race and ethnicity.", 
+             col.names = c("", "White (%)", "Black (%)","Latino (%)","Other (%)", "Total (%)"), 
+             booktabs=T) %>% 
+  kable_classic(full_width=F) %>%
+  pack_rows(index = c("Men"=6, "Women"=6)
+)
+```
+
+## Table 2: Lifetable results.
+
+Lifetable calculations for risk of incarceration by age 30 and solitary confinement by age 32, Pennsylvania (2007-2018).
+
+```{r}
+lifetable <- inc_dur %>% 
+  mutate_at(vars(total_firstsol, total_cumrisk), ~round(.*100, digits=2)) %>%
+  select(Age, `Incarceration Age-Specific Risk`=total_firstsol, `Incarceration Cumulative Risk`=total_cumrisk) %>%
+  inner_join(
+    lf_dur %>% 
+      filter(sol_duration==0) %>%
+      mutate_at(vars(total_firstsol, total_cumrisk), ~round(.*100, digits=2)) %>%
+      select(Age=age, `Solitary Age-Specific Risk`=total_firstsol, `Solitary Cumulative Risk`=total_cumrisk),
+    by="Age"
+  ) 
+
+lifetable
+```
+
+```{r}
+lifetable %>%
+  knitr::kable(format="html", format.args = list(scientific = FALSE, big.mark=","), 
+             caption = "Table 2: Lifetable results. Lifetable calculations for risk of incarceration by age 30 and solitary confinement by age 32, Pennsylvania (2007-2018).", 
+             col.names = c("Age", "Age-Specific Risk", "Cumulative Risk", 
+                           "Age-Specific Risk", "Cumulative Risk"),
+             booktabs=T) %>% 
+  kable_classic(full_width=F) %>%
+  add_header_above(c(" ", "Prison Incarceration"=2, "Solitary Confinement"=2)) 
+```
+
+## Table 3: Cumulative risk by race. 
+
+Cumulative risk of incarceration by age 30, and solitary confinement by age 32, for Pennsylvania men and women born 1986 to 1989 by race and ethnicity. Risk ratios show the race-specific risk compared to the risk for white individuals.
+
+```{r}
+calc_risks <- function(duration_var){
+  inc_dur %>%
+    filter(Age==30) %>%
+    rename(m_total_cumrisk=male_cumrisk, f_total_cumrisk=female_cumrisk) %>%
+    select(Age, 
+           m_total_cumrisk, m_white_cumrisk, m_black_cumrisk, m_Hispanic_cumrisk, m_other_cumrisk,
+           f_total_cumrisk, f_white_cumrisk, f_black_cumrisk, f_Hispanic_cumrisk, f_other_cumrisk) %>%
+    pivot_longer(-Age, names_sep="_", names_to=c("gender", "race", ".value")) %>%
+    mutate(gender=if_else(gender=="m", "Male", "Female"),
+           race=str_to_title(race)) %>%
+    rename(risk_incar=cumrisk) %>%
+    group_by(Age, gender) %>%
+    mutate(rel_risk_incar=risk_incar/risk_incar[race=="White"]) %>%
+    ungroup() %>%
+    mutate(risk_incar=risk_incar*100) %>% 
+    select(-Age) %>%
+    left_join(
+      lf_dur %>%
+        rename(Age=age, m_total_cumrisk=male_cumrisk, f_total_cumrisk=female_cumrisk) %>%
+        filter(sol_duration==duration_var & Age==32) %>%
+        select(Age, 
+               m_total_cumrisk, m_white_cumrisk, m_black_cumrisk, m_Hispanic_cumrisk, m_other_cumrisk,
+               f_total_cumrisk, f_white_cumrisk, f_black_cumrisk, f_Hispanic_cumrisk, f_other_cumrisk
+               ) %>%
+        pivot_longer(-Age, names_sep="_", names_to=c("gender", "race", ".value")) %>%
+        mutate(gender=if_else(gender=="m", "Male", "Female"),
+               race=str_to_title(race)) %>%
+        rename(risk_solitary=cumrisk) %>%
+        group_by(Age, gender) %>%
+        mutate(rel_risk_solitary=risk_solitary/risk_solitary[race=="White"]) %>%
+        ungroup() %>%
+        mutate(risk_solitary=risk_solitary*100) %>% 
+        select(-Age),
+      by=c("race", "gender"))
+}
+```
+
+
+```{r}
+view_risks <- function(duration_var){
+  age32_risk <- calc_risks(duration_var)
+  
+  age32_risk %>%
+    select(-gender) %>%
+    knitr::kable(format="html", digits=2, format.args = list(scientific = FALSE, big.mark=","), 
+               caption = "Table 3. Cumulative risk by race. Cumulative risk of incarceration by age 30, and solitary confinement by age 32, for Pennsylvania men and women born 1986 to 1989 by race and ethnicity. Risk ratios show the race-specific risk compared to the risk for white individuals.",
+               col.names = c(" ",
+                             "Imprisonment By Age 30 (%)", 
+                             "Imprisonment Relative Risk Ratio",
+                             "Solitary Confinement By Age 32 (%)", 
+                             "Solitary Relative Risk Ratio"), 
+               booktabs=T) %>% 
+    kable_classic(full_width=F) %>%
+    pack_rows(index=c("Men"=5, "Women"=5))
+}
+```
+
+```{r}
+view_risks(0)
+# view_risks(15)
+# view_risks(30)
+# view_risks(60)
+# view_risks(90)
+```
+
+
+## Table 4: Log Ratio Disparity
+
+```{r}
+calc_disparity <- function(duration_var) {
+  inc_dur %>%
+  rename(m_total_cumrisk=male_cumrisk, f_total_cumrisk=female_cumrisk) %>%
+  select(Age, m_total_cumrisk, m_white_cumrisk, m_black_cumrisk, m_Hispanic_cumrisk, m_other_cumrisk, f_total_cumrisk, f_white_cumrisk, f_black_cumrisk, f_Hispanic_cumrisk, f_other_cumrisk) %>%
+  pivot_longer(-Age, names_sep="_", names_to=c("gender", "race", ".value")) %>%
+  mutate(gender=if_else(gender=="m", "Men", "Women"),
+         race=str_to_title(race)) %>%
+  rename(incar=cumrisk) %>%
+  mutate_at(vars(incar), ~.*100) %>%
+  left_join(
+    lf_dur %>%
+      rename(Age=age, m_total_cumrisk=male_cumrisk, f_total_cumrisk=female_cumrisk) %>%
+      filter(sol_duration==duration_var) %>%
+      select(Age, m_total_cumrisk, m_white_cumrisk, m_black_cumrisk, m_Hispanic_cumrisk, m_other_cumrisk, f_total_cumrisk, f_white_cumrisk, f_black_cumrisk, f_Hispanic_cumrisk, f_other_cumrisk) %>%
+      pivot_longer(-Age, names_sep="_", names_to=c("gender", "race", ".value")) %>%
+      mutate(gender=if_else(gender=="m", "Men", "Women"),
+             race=str_to_title(race)) %>%
+      rename(sol=cumrisk) %>%
+      mutate_at(vars(sol), ~.*100),
+    by=c("Age", "race", "gender")
+  ) %>%
+  select(Age, gender, race, incar, sol) %>% 
+  filter(Age==32 & race != "Total" & race != "Other") %>%
+  select(-Age) %>%
+  mutate(cond=sol/incar) %>%
+  pivot_longer(c(-gender, -race), names_to="probability", values_to="value") %>%
+  pivot_wider(names_from=race, values_from=c(value)) %>%
+  mutate(
+    bw_logdiff=log(Black)-log(White),
+    bh_logdiff=log(Black)-log(Hispanic),
+    hw_logdiff=log(Hispanic)-log(White)
+  ) %>%
+  rename(White_prob=White, Black_prob=Black, Hispanic_prob=Hispanic) %>%
+  pivot_longer(c(-gender, -probability), names_sep="_", names_to=c("race", ".value")) %>%
+  pivot_wider(names_from=probability, values_from=c(prob, logdiff)) %>%
+  mutate(logprob_incar=(logdiff_incar/logdiff_sol)*100, 
+         logprob_cond=(logdiff_cond/logdiff_sol)*100, 
+         logprob_sol=(logdiff_sol/logdiff_sol)*100
+         ) %>%
+  pivot_longer(c(-race, -gender), names_sep="_", names_to=c(".value", "probability_type")) %>%
+  group_by(gender, probability_type) %>%
+  mutate(
+    group1_prob=case_when(
+      race=="bw" ~ prob[race=="Black"],
+      race=="bh" ~ prob[race=="Black"],
+      race=="hw" ~ prob[race=="Hispanic"], #"Hispanic"
+      TRUE ~ NA_real_
+    ),
+    group2_prob=case_when(
+      race=="bw" ~ prob[race=="White"],
+      race=="bh" ~ prob[race=="Hispanic"],
+      race=="hw" ~ prob[race=="White"], #"White"
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  ungroup() %>%
+  filter(race %in% c("bw", "bh", "hw")) %>%
+  select(-prob) %>%
+  mutate(rate=exp(logdiff)) %>%
+  mutate(probability_type=case_when(
+      probability_type=="cond" ~ "Solitary given incarceration", #"P(S|I)",
+      probability_type=="incar" ~ "Incarceration", #"P(I)",
+      probability_type=="sol" ~ "Total solitary", #"P(S)",
+      TRUE ~ NA_character_
+    ),
+    probability_type=factor(probability_type, levels = c("Incarceration", "Solitary given incarceration", "Total solitary")),
+    race=factor(race, levels = c("bw", "hw", "bh"))) %>%
+  arrange(gender, race, probability_type) %>%
+  select(gender, race, probability_type, logdiff, logprob, rate)
+}
+```
+
+```{r}
+view_disparity <- function(duration_var){
+  log_table <- calc_disparity(duration_var)
+  
+  log_table %>% select(probability_type, logdiff, rate, logprob) %>%
+    knitr::kable(format="html", format.args = list(scientific = FALSE), digits=2,
+             caption = "Table 4. Racial disparity in imprisonment and solitary confinement and decomposition results. Racial/ethnic disparities in cumulative risks of incarceration and solitary confinement reported as the difference of logs and relative risks, and decomposition results for racial/ethnic disparities in the cumulative risk of solitary confinement by gender in the Pennsylvania birth cohort, born 1986 to 1989.",
+             col.names = c("", "Difference of Logs", "Relative Risk", "Percent (%)"), booktabs=T) %>% 
+  kable_classic(full_width=F) %>%
+  pack_rows(index=c("Men"=9, "Women"=9)) %>%
+  pack_rows(index=c("Black-White Disparity"=3, "Latino-White Disparity"=3, "Black-Latino Disparity"=3,
+                    "Black-White Disparity"=3, "Latino-White Disparity"=3, "Black-Latino Disparity"=3))
+}
+```
+
+```{r}
+view_disparity(0)
+# view_disparity(15)
+# view_disparity(30)
+# view_disparity(60)
+# view_disparity(90)
+```
+
+
+## Figure 1: Solitary by duration. 
+
+Cumulative risk at age 32 in Pennsylvania, by duration of solitary confinement in days, by race/ethnicity for men (A) and women (B).
+
+```{r}
+x <- lf_dur 
+x0 <- x[x$age==32,
+        c("f_white_cumrisk","f_black_cumrisk","f_Hispanic_cumrisk","f_other_cumrisk",
+          "m_white_cumrisk","m_black_cumrisk","m_Hispanic_cumrisk","m_other_cumrisk",
+          "sol_duration"),]
+
+#pdf(paste0(data_folder, "solitary_duration.pdf"),height=6,width=9)
+
+par(mfrow=c(1,2), oma=c(2.5,2.5,0.1,0.1), mar=c(2.5, 1.5, 1, 1))
+
+
+plot(x0$sol_duration+1, 100*x0$m_black_cumrisk, type="l", lwd=2, col="red",
+     ylim=c(0, 1.02*12),
+     xlab="", 
+     ylab="Cumulative Risk (%)",
+     family="sans")
+lines(x0$sol_duration+1, 100*x0$m_white_cumrisk, lty=4, lwd=2, col="blue")
+lines(x0$sol_duration+1, 100*x0$m_Hispanic_cumrisk, lty=2, lwd=2, col="orange")
+lines(x0$sol_duration+1, 100*x0$m_other_cumrisk, lty=3, lwd=2, col="lightblue")
+abline(h=seq(0,12,2), v=c(100,200,300), lty=3, col="grey")
+abline(v=15, lty=1, col="gray23")
+text(23, .98*12, "15 days", adj=0, srt=270, col="gray23", family="sans")
+
+
+plot(x0$sol_duration+1, 100*x0$f_black_cumrisk, type="l", lwd=2, col="red",
+     ylim=c(0, .5),
+     xlab="", 
+     ylab="", 
+     family="sans")
+lines(x0$sol_duration+1, 100*x0$f_white_cumrisk, lty=4, lwd=2, col="blue")
+lines(x0$sol_duration+1, 100*x0$f_Hispanic_cumrisk, lty=2, lwd=2, col="orange")
+lines(x0$sol_duration+1, 100*x0$f_other_cumrisk, lty=3, lwd=2, col="lightblue")
+abline(h=seq(0,.5,.1), v=c(100,200,300), lty=3, col="grey")
+legend(230, .5, c("Black","Latino","White","Other"), title="Race/Ethnicity", 
+       lty=c(1,2,4,3), col=c("red","orange","blue","lightblue"),
+       cex=.95, bty="n", lwd=rep(2,4))
+abline(v=15, lty=1, col="gray23")
+text(23, .98*.5, "15 days", adj=0, srt=270, col="gray23", family="sans")
+
+mtext("Duration (Days)", side=1, line=0, outer=TRUE, cex=1)
+mtext("Cumulative Risk (%)", side=2, line=1, outer=TRUE, cex=1)
+mtext("(A)", side=1, line=1, outer=TRUE, cex=1, adj=0.25, font=2)
+mtext("(B)", side=1, line=1, outer=TRUE, cex=1, adj=0.75, font=2)
+
+#dev.off()
+```
+
+## Figure 2: Racial/ethnic disparity by duration of solitary confinement. 
+
+Smoothed relative cumulative risks of solitary confinement and solitary confinement given incarceration, for men (A) and women (B) by number of consecutive days in solitary confinement.
+
+```{r}
+all_durs <- inc_dur %>%
+  rename(m_total_cumrisk=male_cumrisk, f_total_cumrisk=female_cumrisk) %>%
+  select(Age, 
+         m_total_cumrisk, m_white_cumrisk, m_black_cumrisk, m_Hispanic_cumrisk, m_other_cumrisk,
+         f_total_cumrisk, f_white_cumrisk, f_black_cumrisk, f_Hispanic_cumrisk, f_other_cumrisk) %>%
+  pivot_longer(-Age, names_sep="_", names_to=c("gender", "race", ".value")) %>%
+  mutate(gender=if_else(gender=="m", "men_incar", "women_incar"),
+         race=str_to_title(race)) %>%
+  pivot_wider(names_from=gender, values_from=c(cumrisk)) %>%
+  mutate_at(vars(men_incar, women_incar), ~.*100) %>%
+  left_join(
+    lf_dur %>%
+      rename(Age=age, m_total_cumrisk=male_cumrisk, f_total_cumrisk=female_cumrisk) %>%
+      select(Age, sol_duration, 
+             m_total_cumrisk, m_white_cumrisk, m_black_cumrisk, m_Hispanic_cumrisk, m_other_cumrisk,
+             f_total_cumrisk, f_white_cumrisk, f_black_cumrisk, f_Hispanic_cumrisk, f_other_cumrisk) %>%
+      pivot_longer(c(-Age, -sol_duration), names_sep="_", names_to=c("gender", "race", ".value")) %>%
+      mutate(gender=if_else(gender=="m", "men_sol", "women_sol"),
+             race=str_to_title(race)) %>%
+      pivot_wider(names_from=gender, values_from=c(cumrisk)) %>%
+      mutate_at(vars(men_sol, women_sol), ~.*100),
+    by=c("Age", "race")
+  ) %>%
+  select(Age, race, sol_duration, starts_with("men"), starts_with("women")) %>%
+  filter(Age==32 & race != "Total" & race != "Other") %>%
+  mutate(men_cond=men_sol/men_incar, women_cond=women_sol/women_incar) %>%
+  pivot_longer(c(-Age, -race, -sol_duration), names_sep="_", names_to=c(".value", "probability")) %>%
+  pivot_wider(names_from=race, values_from=c(men, women)) %>%
+  mutate(
+    men_bw_logdiff=log(men_Black)-log(men_White),
+    men_bh_logdiff=log(men_Black)-log(men_Hispanic),
+    men_hw_logdiff=log(men_Hispanic)-log(men_White),
+    women_bw_logdiff=log(women_Black)-log(women_White),
+    women_bh_logdiff=log(women_Black)-log(women_Hispanic),
+    women_hw_logdiff=log(women_Hispanic)-log(women_White) 
+  ) %>%
+  rename(men_Black_prob=men_Black, men_White_prob=men_White, men_Hispanic_prob=men_Hispanic, women_White_prob=women_White, women_Black_prob=women_Black, women_Hispanic_prob=women_Hispanic) %>%
+  pivot_longer(c(-Age, -sol_duration, -probability), 
+               names_sep="_", names_to=c("gender", "race", ".value")) %>%
+  pivot_wider(names_from=probability, values_from=c(prob, logdiff)) %>%
+  mutate(logprob_incar=(logdiff_incar/logdiff_sol)*100, 
+         logprob_cond=(logdiff_cond/logdiff_sol)*100, 
+         logprob_sol=(logdiff_sol/logdiff_sol)*100
+         ) %>%
+  pivot_longer(c(-Age, -race, -gender, -sol_duration), 
+               names_sep="_", names_to=c(".value", "probability_type")) %>%
+  group_by(Age, gender, sol_duration, probability_type) %>%
+  mutate(
+    group1_prob=case_when(
+      race=="bw" ~ prob[race=="Black"],
+      race=="bh" ~ prob[race=="Black"],
+      race=="hw" ~ prob[race=="Hispanic"], 
+      TRUE ~ NA_real_
+    ),
+    group2_prob=case_when(
+      race=="bw" ~ prob[race=="White"],
+      race=="bh" ~ prob[race=="Hispanic"],
+      race=="hw" ~ prob[race=="White"], 
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  ungroup() %>%
+  filter(race %in% c("bw", "bh", "hw")) %>%
+  select(-prob) %>%
+  mutate(rate=exp(logdiff)) %>%
+  pivot_wider(names_from=gender, values_from=c(group1_prob, group2_prob, logdiff, logprob, rate)) %>%
+  mutate(probability_type=case_when(
+      probability_type=="cond" ~ "P(S|I)",
+      probability_type=="incar" ~ "P(I)",
+      probability_type=="sol" ~ "P(S)",
+      TRUE ~ NA_character_
+    ),
+    probability_type=factor(probability_type, levels = c("P(I)", "P(S|I)", "P(S)")),
+    race=factor(race, levels=c("bw", "hw", "bh"), 
+                labels=c("Black-White", "Latino-White", "Black-Latino"))) %>%
+  arrange(sol_duration, race, Age, probability_type) %>%
+  select(sol_duration, race, Age, probability_type, contains("_men"), contains("_women"))
+
+all_durs
+```
+
+```{r}
+#pdf(paste0(data_folder, "disparity_duration.pdf"), height=6, width=9)
+
+par(mfrow=c(2,2), family="sans", oma=c(1,1,0,0), mar=c(2.5, 3.5, 2.5, 1)) 
+
+xlmts <- c(0, 365)
+ylmts <- c(0, 12)
+
+g1 <- all_durs %>% filter(probability_type=="P(S)") %>% select(sol_duration, rate_men, race) %>%
+  pivot_wider(names_from=race, values_from=rate_men)
+
+plot(predict(loess(`Black-White`~sol_duration+1, data=g1, span=0.08, se=T)), 
+     main="", xlab="", ylab="", family="sans",
+     type="l", lwd=2, col="red",
+     xlim=xlmts, ylim=ylmts)
+lines(predict(loess(`Black-Latino`~sol_duration+1, data=g1, span=0.08, se=T)), lty=4, lwd=2, col="blue") 
+lines(predict(loess(`Latino-White`~sol_duration+1, data=g1, span=0.08, se=T)), lty=2, lwd=2, col="orange")
+abline(h=seq(0, 12, 2), v=c(100,200,300), lty=3, col="grey")
+mtext("(A)", side=2, line=2, adj=0.5, cex=0.95, font=2)
+mtext("Solitary", side=3, line=1, adj=0.5, cex=0.95, font=2)
+
+g2 <- all_durs %>% filter(probability_type=="P(S|I)") %>% select(sol_duration, rate_men, race) %>%
+  pivot_wider(names_from=race, values_from=rate_men)
+
+plot(predict(loess(`Black-White`~sol_duration+1, data=g2, span=0.08, se=T)), 
+     main="", xlab="", ylab="", family="sans",
+     type="l", lwd=2, col="red",
+     xlim=xlmts, ylim=ylmts)
+lines(predict(loess(`Black-Latino`~sol_duration+1, data=g2, span=0.08, se=T)), lty=4, lwd=2, col="blue")
+lines(predict(loess(`Latino-White`~sol_duration+1, data=g2, span=0.08, se=T)), lty=2, lwd=2, col="orange")
+abline(h=seq(0, 12, 2), v=c(100,200,300), lty=3, col="grey")
+mtext("Solitary Given Incarceration", side=3, line=1, adj=0.5, cex=0.95, font=2)
+legend(210, 13.5, c("Black-White Ratio", "Black-Latino Ratio", "Latino-White Ratio"), 
+       title="",
+       lty=c(1,4,2), col=c("red","blue","orange"),
+       cex=0.95, bty="n", lwd=rep(2,4))
+
+g3 <- all_durs %>% filter(probability_type=="P(S)") %>% select(sol_duration, rate_women, race) %>%
+  pivot_wider(names_from=race, values_from = rate_women)
+
+plot(predict(loess(`Black-White`~sol_duration+1, data=g3, span=0.08, se=T)), 
+     main="", xlab="", ylab="", family="sans",
+     type="l", lwd=2, col="red",
+     xlim=xlmts, ylim=ylmts)
+lines(predict(loess(`Black-Latino`~sol_duration+1, data=g3, span=0.08, se=T)), lty=4, lwd=2, col="blue") 
+lines(predict(loess(`Latino-White`~sol_duration+1, data=g3, span=0.08, se=T)), lty=2, lwd=2, col="orange")
+abline(h=seq(0, 12, 2), v=c(100,200,300), lty=3, col="grey")
+mtext("(B)", side=2, line=2, adj=0.5, cex=0.95, font=2)
+
+g4 <- all_durs %>% filter(probability_type=="P(S|I)") %>% select(sol_duration, rate_women, race) %>%
+   pivot_wider(names_from=race, values_from = rate_women)
+
+plot(predict(loess(`Black-White`~sol_duration+1, data=g4, span=0.08, se=T)), 
+     main="", xlab="", ylab="", family="sans",
+     type="l", lwd=2, col="red",
+     xlim=xlmts, ylim=ylmts)
+lines(predict(loess(`Black-Latino`~sol_duration+1, data=g4, span=0.08, se=T)), lty=4, lwd=2, col="blue")
+lines(predict(loess(`Latino-White`~sol_duration+1, data=g4, span=0.08, se=T)), lty=2, lwd=2, col="orange")
+abline(h=seq(0, 12, 2), v=c(100,200,300), lty=3, col="grey")
+
+mtext("Duration (Days)", side=1, line=0, outer=TRUE, cex=0.95)
+mtext("Disparity Ratio", side=2, line=0, outer=TRUE, cex=0.95, las=0)
+
+#dev.off()
+```
+
+## Table 5: Population race/ethnicity compositions. 
+
+Percentage distribution of race/ethnicity of a Pennsylvania birth cohort, born 1986-1989, by gender for the total state census population, the cohort admitted to prison by age 30 (2007-2016), and the cohort held in solitary confinement by age 32 (2007-2018).
+
+```{r}
+# 2010 state population
+table5 <- read_csv(paste0(data_folder, "external_data/bc_census_pop_est.csv")) %>% 
+  filter(age >= 21 & age <= 24) %>% # birth cohort during 2010
+  group_by(male) %>%
+  summarize(
+    sample_size=sum(pop, na.rm=T),
+    white=sum(pop[race=="white"], na.rm=T),
+    black=sum(pop[race=="black"], na.rm=T),
+    latino=sum(pop[race=="Hispanic"], na.rm=T),
+    other=sum(pop[race=="other"], na.rm=T)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    data_type="State Population (2010)"
+  ) %>%
+  # prison population
+  bind_rows(
+    bc_df %>%
+      filter(birth_year >= 1986 & birth_year <= 1989) %>%
+      group_by(male, race) %>%
+      summarize(ids=n_distinct(id)) %>%
+      ungroup() %>%
+      pivot_wider(names_from=race, values_from=ids) %>%
+      mutate(sample_size=black+Hispanic+white+other,
+             data_type="Prison Population (2007-2016)") %>%
+      rename(latino=Hispanic)
+  ) %>%
+  # solitary population
+  bind_rows(
+    bc_df %>%
+      filter(birth_year >= 1986 & birth_year <= 1989 & sanction=="solitary") %>%
+      group_by(male, race) %>%
+      summarize(ids=n_distinct(id)) %>%
+      ungroup() %>%
+      pivot_wider(names_from=race, values_from=ids) %>%
+      mutate(sample_size=black+Hispanic+white+other,
+             data_type="Solitary Population (2007-2018)") %>%
+      rename(latino=Hispanic)
+  ) %>%
+  # create percents
+  mutate_at(vars(white, black, latino, other), ~(./sample_size)*100) %>%
+  mutate(data_type=factor(data_type, 
+                          levels = c("State Population (2010)", 
+                                     "Prison Population (2007-2016)", 
+                                     "Solitary Population (2007-2018)"))) %>%
+  arrange(desc(male), data_type) %>%
+  select(male, data_type, white, black, latino, other, sample_size)
+
+table5
+```
+
+```{r}
+table5 %>%
+  select(-male) %>%
+  knitr::kable(format="html", digits=1, format.args = list(scientific = FALSE, big.mark=","), 
+             caption = "Table 5. Population race/ethnicity compositions. Percentage distribution of race/ethnicity of a Pennsylvania birth cohort, born 1986-1989, by gender for the total state census population, the cohort admitted to prison by age 30 (2007-2016), and the cohort held in solitary confinement by age 32 (2007-2018).",
+             col.names = c(" ", "White (%)", "Black (%)", "Latino (%)", "Other (%)", "Sample Size (N)"), 
+             booktabs=T) %>% 
+  kable_classic(full_width=F) %>%
+  pack_rows(index=c("Men"=3, "Women"=3))
+```
+
+## Table 6: Solitary confinement exposure statistics. 
+
+Solitary confinement incarceration characteristics of a Pennsylvania prison admission cohort, born 1986-1989, by gender and race/ethnicity.
+
+```{r}
+# summary by race and gender
+gender_race <- bc_df %>%
+  group_by(male, race) %>%
+  summarize(n_ids=n_distinct(id, na.rm=T)) %>%
+  ungroup() %>%
+  left_join(
+    bc_df %>%
+      filter(sanction=="solitary") %>%
+      group_by(id, male, race) %>%
+      summarize(
+        mean_days=mean(acdcdays, na.rm=T),
+        tot_days=sum(acdcdays, na.rm=T)
+      ) %>%
+      ungroup() %>%
+      group_by(male, race) %>%
+      summarize(
+        solitary_ids=n(),
+        median_mean_days=median(mean_days, na.rm=T),
+        median_total_days=median(tot_days, na.rm=T)
+      ) %>%
+      ungroup(),
+    by=c("male", "race")
+  ) %>%
+  mutate(percent_solitary=(solitary_ids/n_ids)*100) 
+  
+# total row
+gender <- bc_df %>%
+  group_by(male) %>%
+  summarize(n_ids=n_distinct(id, na.rm=T)) %>%
+  ungroup() %>%
+  left_join(
+    bc_df %>%
+      filter(sanction=="solitary") %>%
+      group_by(id, male) %>%
+      summarize(
+        mean_days=mean(acdcdays, na.rm=T),
+        tot_days=sum(acdcdays, na.rm=T)
+      ) %>%
+      ungroup() %>%
+      group_by(male) %>%
+      summarize(
+        solitary_ids=n(),
+        median_mean_days=median(mean_days, na.rm=T),
+        median_total_days=median(tot_days, na.rm=T)
+      ) %>%
+      ungroup(),
+    by=c("male")) %>%
+  mutate(race="Total", percent_solitary=(solitary_ids/n_ids)*100) 
+
+# row of sample sizes for each variable (prison pop or solitary pop)
+sample_size <- gender %>%
+  mutate(
+    race="Sample size (N)",
+    percent_solitary=n_ids,
+    median_mean_days=solitary_ids,
+    median_total_days=solitary_ids
+  ) 
+  
+table6 <- gender_race %>% 
+  bind_rows(gender) %>%
+  bind_rows(sample_size) %>%
+  select(male, race, percent_solitary, median_mean_days, median_total_days) %>%
+  mutate(race=if_else(race=="Hispanic", "Latino", str_to_title(race)),
+         race=factor(race, levels = c("White", "Black", "Latino", "Other", "Total", "Sample Size (N)"))) %>%
+  arrange(desc(male), race)
+
+table6
+```
+
+```{r}
+table6 %>%
+  select(-male) %>%
+  knitr::kable(format="html", digits=1, format.args = list(scientific = FALSE, big.mark=","), 
+             caption = "Table 6. Solitary confinement exposure statistics. Solitary confinement incarceration characteristics of a Pennsylvania prison admission cohort, born 1986-1989, by gender and race/ethnicity.",
+             col.names = c(" ", "Ever in Solitary Confinement (%)", "Median Average Time in Solitary Confinement (Days)", "Median Cumulative Time in Solitary Confinement (Days)"), 
+             booktabs=T) %>% 
+  kable_classic(full_width=F) %>%
+  pack_rows(index=c("Men"=6, "Women"=6))
+```
+
+
+
