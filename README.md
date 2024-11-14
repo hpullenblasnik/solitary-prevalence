@@ -34,7 +34,7 @@ pa\_mortality\_data.csv: mortality by age, race, and gender (CDC: https://wonder
 
 usa\_00001.csv: state-level migration by year, age, race, and gender (IPUMS: https://usa.ipums.org/usa-action/data_requests/download)
 
-#### Jcore Style
+#### Aggregates
 
 bc\_pop\_avg.csv: PA state population estimates for ages 18-32 by race and gender.
 
