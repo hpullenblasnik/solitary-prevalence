@@ -4,7 +4,7 @@ Hannah Pullen-Blasnik (hannah.pullen-blasnik@columbia.edu)
 
 09/21/2021
 
-This code provides documentation for the paper "The Population Prevalence of Solitary Confinement" by Hannah Pullen-Blasnik, Jessica T. Simes, and Bruce Western.
+This code provides documentation for the paper "[The Population Prevalence of Solitary Confinement]([url](https://www.science.org/doi/10.1126/sciadv.abj1928))" by Hannah Pullen-Blasnik, Jessica T. Simes, and Bruce Western, published in _Science Advances_.
 
 Per our data use agreement, data used in this analysis is not publicly available. Requests may be made for data access following a material transfer agreement to bruce.western@columbia.edu and simes@bu.edu.
 
